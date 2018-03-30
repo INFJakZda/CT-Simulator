@@ -1,12 +1,18 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import scipy.signal as sig
+import skimage.morphology as mp
 
+from skimage import filters
+from skimage.exposure import rescale_intensity
 from skimage.io import imread
 from skimage import data_dir
 from scipy import misc
 from skimage.color import rgb2gray
+from math import floor
+from sklearn.metrics import mean_squared_error
 
-filename = "./data/test.png"
+filename = "./data/shepp_logan2.png"
 width = 90
 alpha = 2
 detector_amount = 180
@@ -72,11 +78,11 @@ def bresenham_line(x1, y1, x2, y2):
 
     return line
 
-def save_snapshot(sinogram):
+def save_snapshot(sinogram, directory):
     save_snapshot.counter += 1
     fig, plots = plt.subplots(1,1)
     plots.imshow(sinogram, cmap='gray')
-    plt.savefig("out_sin/snapshot_sinogram_" + str(save_snapshot.counter) + ".png")
+    plt.savefig(directory + "/snapshot_sinogram_" + str(save_snapshot.counter) + ".png")
 
 save_snapshot.counter = 0  
 
@@ -100,7 +106,7 @@ def get_normalised_pixel(image, line):
             value += float(image[int(pos[0]), int(pos[1])])
             count += 1
     average = value / count
-    return count, average, value
+    return average
 
 def radon_transform(image):
     picture_size = len(image[0])
@@ -118,16 +124,109 @@ def radon_transform(image):
             #assignation of pixels
             line = bresenham_line(x1, y1, x2, y2)
             #normalization of the pixel
-            count, average, value = get_normalised_pixel(image, line)            
+            average = get_normalised_pixel(image, line)            
             #save results                         
             sinogram[-1].append(average)
-            lines[-1].append([x1, y1, x2, y2])        
-        save_snapshot(sinogram)
+            lines[-1].append([x1, y1, x2, y2])
+        if(iteration % 30 == 0):
+            print("Sinogram", save_snapshot.counter)    
+            save_snapshot(sinogram, "out_sin")
     return sinogram, lines
     
+#*****************REVERSE RADON***********************
+def filtering_picture(img) :
+    new_img = filters.gaussian(img, sigma=1)
+    new_img = mp.dilation(mp.erosion(new_img))
+    return new_img
 
-def reverse_radon(image, sinogram, lines):
-    return 0
+def normalizing_picture(reconstructed, helper):
+    normalized = np.copy(reconstructed)
+    picture_shape = np.shape(normalized)
+    width = picture_shape[0]
+    height = picture_shape[1]
+
+    for i in range (0, width, 1):
+        for j in range (0, height, 1):
+            if helper[i][j] != 0:
+                normalized[i][j] = normalized[i][j]/helper[i][j]
+    return normalized
+
+def make_mask(detectors):
+    mask_size = floor(detectors/2)
+    mask = np.zeros(mask_size)
+    center = floor(mask_size/2)
+    for i in range(0, mask_size, 1):
+        k = i - center
+        if k % 2 != 0:
+            mask[i] = (-4/np.pi**2)/k**2
+    mask[center] = 1
+    return mask
+
+def filtering_sinogram(sinogram): # maska na sinogram convolve, http://www.dspguide.com/ch25/5.htm
+    sinogram_shape = np.shape(sinogram)
+    number_of_projections = sinogram_shape[0]
+    number_of_detectors = sinogram_shape[1]
+    filtered = np.zeros((number_of_projections, number_of_detectors))
+    mask = make_mask(number_of_detectors)
+    for projection in range (0, number_of_projections, 1):
+        filtered[projection] = sig.convolve(sinogram[projection], mask, mode = 'same', method='direct')
+    return filtered
+
+def reverse_radon(image, sinogram_org, lines):
+    # wymiary zdjęcia końcowego
+    picture_shape = np.shape(image)
+    width = picture_shape[0]
+    height = picture_shape[1]
+    # dane o projekcjach i detektorach
+    sinogram_shape = np.shape(sinogram_org)
+    number_of_projections = sinogram_shape[0]
+    number_of_detectors = sinogram_shape[1]
+    # dane do rekonstrukcji zdjęcia
+    reconstructed = np.zeros(shape = picture_shape)
+    reconstructed_nofilterd = np.zeros(shape = picture_shape)
+    helper = np.zeros(shape = picture_shape)
+
+    sinogram = filtering_sinogram(sinogram_org)
+
+    # rekonstrukcja zdjęcia
+    for projection in range (0, number_of_projections, 1):
+        for detector in range (0, number_of_detectors, 1):
+            x1, y1, x2, y2 = lines[projection][detector]
+            line = bresenham_line(x1, y1, x2, y2)
+            value = sinogram[projection][detector]
+            value_nof = sinogram_org[projection][detector]
+            for i in range (0, len(line), 1):
+                    x, y = line[i]
+                    if x >= 0 and y >= 0 and x < width and y < height:
+                        reconstructed_nofilterd[int(x)][int(y)] += value_nof
+                        reconstructed[int(x)][int(y)] += value
+                        helper[int(x)][int(y)] += 1
+
+        fragment = normalizing_picture(reconstructed, helper)
+        fragment[fragment[:,:] < 0] = 0
+        fragment = rescale_intensity(fragment)
+        reconstructed2 = filtering_picture(fragment)
+
+        if(projection % 30 == 0):
+            print("Reconstructed", save_snapshot.counter)
+            save_snapshot(reconstructed2, "out_rec")
+            
+    fragment = normalizing_picture(reconstructed, helper)
+    fragment[fragment[:,:] < 0] = 0
+    fragment = rescale_intensity(fragment)
+    #reconstructed = filtering_picture(fragment)
+    reconstructed = fragment
+    save_snapshot(reconstructed, "out_fin")
+    
+    fragment = normalizing_picture(reconstructed_nofilterd, helper)
+    fragment[fragment[:,:] < 0] = 0
+    fragment = rescale_intensity(fragment)
+    #reconstructed_nofilterd = filtering_picture(fragment)
+    reconstructed_nofilterd = fragment
+    save_snapshot(reconstructed_nofilterd, "out_fin")
+    
+    return reconstructed, reconstructed_nofilterd
+    
     
 def read_image(filename):
     #image = imread(filename, as_grey=True)
@@ -135,10 +234,17 @@ def read_image(filename):
     image[24:174, 24:174] = rgb2gray(imread(filename))
     return(image)
 
+def mean_squared(picture, reconstructed, reconstructed_nofilterd):
+    print("Mean squared error with filtering: ", mean_squared_error(picture, reconstructed))
+    print("Mean squared error without filtering: ", mean_squared_error(picture, reconstructed_nofilterd))
+
 if __name__ == '__main__':
 
     org_image = read_image(filename)
     
     sinogram, lines = radon_transform(org_image)
     
-    reconstruction = reverse_radon(org_image, sinogram, lines)
+    reconst_image, reconstructed_nofilterd = reverse_radon(org_image, sinogram, lines)
+    
+    mean_squared(org_image, reconst_image, reconstructed_nofilterd)
+    
